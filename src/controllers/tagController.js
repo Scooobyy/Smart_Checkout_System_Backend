@@ -3,23 +3,24 @@ const { successResponse, errorResponse, validateRequiredFields } = require('../u
 
 class TagController {
   
-  // Create a single tag
-  async createTag(req, res, next) {
+  // Create UHF RFID tag
+  async createUHF(req, res, next) {
     try {
-      const { tag_uid, product_id, status } = req.body;
+      const { uhf_uid, product_id, qr_code_data, status } = req.body;
 
-      validateRequiredFields(req.body, ['tag_uid']);
+      validateRequiredFields(req.body, ['uhf_uid']);
 
       const tagData = {
-        tag_uid,
+        uhf_uid,
         product_id,
+        qr_code_data,
         status: status || 'available'
       };
 
-      const tag = await tagModel.createTag(tagData);
+      const tag = await tagModel.createUHF(tagData);
 
       res.status(201).json(
-        successResponse('NFC tag created successfully', { tag })
+        successResponse('UHF RFID tag created successfully', { tag })
       );
 
     } catch (error) {
@@ -27,23 +28,23 @@ class TagController {
     }
   }
 
-  // Create multiple tags in bulk
-  async createBulkTags(req, res, next) {
+  // Create multiple UHF tags in bulk
+  async createBulkUHFTags(req, res, next) {
     try {
-      const { tag_uids } = req.body;
+      const { uhf_uids } = req.body;
 
-      validateRequiredFields(req.body, ['tag_uids']);
+      validateRequiredFields(req.body, ['uhf_uids']);
 
-      if (!Array.isArray(tag_uids) || tag_uids.length === 0) {
+      if (!Array.isArray(uhf_uids) || uhf_uids.length === 0) {
         return res.status(400).json(
-          errorResponse('tag_uids must be a non-empty array')
+          errorResponse('uhf_uids must be a non-empty array')
         );
       }
 
-      const tags = await tagModel.createBulkTags(tag_uids);
+      const tags = await tagModel.createBulkUHFTags(uhf_uids);
 
       res.status(201).json(
-        successResponse(`${tags.length} NFC tags created successfully`, { tags })
+        successResponse(`${tags.length} UHF RFID tags created successfully`, { tags })
       );
 
     } catch (error) {
@@ -81,16 +82,16 @@ class TagController {
     }
   }
 
-  // Get tag by UID
+  // Get tag by UHF UID
   async getTagByUid(req, res, next) {
     try {
-      const { tag_uid } = req.params;
+      const { uhf_uid } = req.params;
 
-      const tag = await tagModel.getTagByUid(tag_uid);
+      const tag = await tagModel.getTagByUid(uhf_uid);
 
       if (!tag) {
         return res.status(404).json(
-          errorResponse('Tag not found')
+          errorResponse('UHF tag not found')
         );
       }
 
@@ -103,18 +104,18 @@ class TagController {
     }
   }
 
-  // Assign tag to product
+  // Assign UHF tag to product
   async assignTagToProduct(req, res, next) {
     try {
-      const { tag_id } = req.params;
-      const { product_id } = req.body;
+      const { uhf_uid } = req.params;
+      const { product_id, qr_code_data } = req.body;
 
       validateRequiredFields(req.body, ['product_id']);
 
-      const updatedTag = await tagModel.assignTagToProduct(tag_id, product_id);
+      const updatedTag = await tagModel.assignTagToProduct(uhf_uid, product_id, qr_code_data);
 
       res.json(
-        successResponse('Tag assigned to product successfully', { tag: updatedTag })
+        successResponse('UHF tag assigned to product successfully', { tag: updatedTag })
       );
 
     } catch (error) {
@@ -125,9 +126,9 @@ class TagController {
   // Unassign tag from product
   async unassignTag(req, res, next) {
     try {
-      const { tag_id } = req.params;
+      const { uhf_uid } = req.params;
 
-      const updatedTag = await tagModel.unassignTag(tag_id);
+      const updatedTag = await tagModel.unassignTag(uhf_uid);
 
       res.json(
         successResponse('Tag unassigned successfully', { tag: updatedTag })
@@ -138,15 +139,15 @@ class TagController {
     }
   }
 
-  // Scan tag (simulate NFC scan)
+  // Scan tag (simulate UHF scan)
   async scanTag(req, res, next) {
     try {
-      const { tag_uid } = req.params;
+      const { uhf_uid } = req.params;
 
-      const tag = await tagModel.scanTag(tag_uid);
+      const tag = await tagModel.scanTag(uhf_uid);
 
       res.json(
-        successResponse('Tag scanned successfully', { tag })
+        successResponse('UHF tag scanned successfully', { tag })
       );
 
     } catch (error) {
@@ -160,7 +161,7 @@ class TagController {
       const availableTags = await tagModel.getAvailableTags();
 
       res.json(
-        successResponse('Available tags retrieved successfully', { 
+        successResponse('Available UHF tags retrieved successfully', { 
           tags: availableTags 
         })
       );
@@ -179,6 +180,28 @@ class TagController {
 
       res.json(
         successResponse('Product tags retrieved successfully', { tags })
+      );
+
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // Get product by UHF tag
+  async getProductByUHFTag(req, res, next) {
+    try {
+      const { uhf_uid } = req.params;
+
+      const product = await tagModel.getProductByUHFTag(uhf_uid);
+
+      if (!product) {
+        return res.status(404).json(
+          errorResponse('Product not found for this UHF tag')
+        );
+      }
+
+      res.json(
+        successResponse('Product retrieved successfully', { product })
       );
 
     } catch (error) {

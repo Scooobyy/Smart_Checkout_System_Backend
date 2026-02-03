@@ -3,7 +3,9 @@ const { pool } = require('../config/database');
 const initDatabase = async () => {
   try {
     await pool.query(`
-      -- Admins Table (Simplified - without created_by for now)
+      -- Create tables only if they don't exist (preserve data)
+
+      -- Admins Table
       CREATE TABLE IF NOT EXISTS admins (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(100) UNIQUE NOT NULL,
@@ -18,7 +20,7 @@ const initDatabase = async () => {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
-      -- Products Table
+      -- Products Table with QR Code
       CREATE TABLE IF NOT EXISTS products (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name VARCHAR(255) NOT NULL,
@@ -29,34 +31,25 @@ const initDatabase = async () => {
         image_url VARCHAR(500),
         stock_quantity INTEGER DEFAULT 0 CHECK (stock_quantity >= 0),
         low_stock_threshold INTEGER DEFAULT 5,
+        qr_code_data VARCHAR(255) UNIQUE,  -- Unique QR code identifier
+        qr_code_url VARCHAR(500),          -- URL for QR code
         is_active BOOLEAN DEFAULT true,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
-      -- NFC Tags Table
+      -- UHF RFID Tags Table
       CREATE TABLE IF NOT EXISTS tags (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        tag_uid VARCHAR(100) UNIQUE NOT NULL,
+        uhf_uid VARCHAR(100) UNIQUE NOT NULL,  -- UHF RFID tag ID
         product_id UUID REFERENCES products(id) ON DELETE SET NULL,
+        qr_code_data VARCHAR(255),  -- Links to product QR code
         status VARCHAR(20) DEFAULT 'available' CHECK (status IN ('available', 'assigned', 'in_cart', 'paid', 'deactivated')),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_scanned_at TIMESTAMP
       );
 
-      -- Admin Invitations Table (for future use)
-      CREATE TABLE IF NOT EXISTS admin_invitations (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        email VARCHAR(255) UNIQUE NOT NULL,
-        token VARCHAR(255) UNIQUE NOT NULL,
-        role VARCHAR(50) DEFAULT 'staff',
-        invited_by UUID REFERENCES admins(id),
-        expires_at TIMESTAMP NOT NULL,
-        is_used BOOLEAN DEFAULT false,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-  -- Customers Table
+      -- Customers Table
       CREATE TABLE IF NOT EXISTS customers (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         email VARCHAR(255) UNIQUE NOT NULL,
@@ -122,14 +115,45 @@ const initDatabase = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
+      -- Exit Logs Table
+      CREATE TABLE IF NOT EXISTS exit_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id VARCHAR(255),
+        customer_id UUID REFERENCES customers(id),
+        total_scanned_tags INTEGER DEFAULT 0,
+        unpaid_tags_count INTEGER DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'alert')),
+        alert_triggered BOOLEAN DEFAULT false,
+        alert_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP
+      );
+
+      -- Exit Scanned Items Table
+      CREATE TABLE IF NOT EXISTS exit_scanned_items (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        exit_log_id UUID REFERENCES exit_logs(id) ON DELETE CASCADE,
+        uhf_uid VARCHAR(100) NOT NULL,
+        product_id UUID REFERENCES products(id),
+        order_id UUID REFERENCES orders(id),
+        is_paid BOOLEAN DEFAULT false,
+        scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Admin Invitations Table
+      CREATE TABLE IF NOT EXISTS admin_invitations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        token VARCHAR(255) UNIQUE NOT NULL,
+        role VARCHAR(50) DEFAULT 'staff',
+        invited_by UUID REFERENCES admins(id),
+        expires_at TIMESTAMP NOT NULL,
+        is_used BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
- console.log('✅ Customer & Cart tables checked/created successfully');
-    await createCustomerIndexes();
-
-    console.log('✅ Database tables checked/created successfully');
-
-    // Create indexes (only if they don't exist)
+    console.log('✅ Database tables created successfully');
     await createIndexes();
     
   } catch (error) {
@@ -138,41 +162,50 @@ const initDatabase = async () => {
   }
 };
 
-
-const createCustomerIndexes = async () => {
+const createIndexes = async () => {
   try {
     await pool.query(`
+      -- Admin indexes
+      CREATE INDEX IF NOT EXISTS idx_admins_email ON admins(email);
+      CREATE INDEX IF NOT EXISTS idx_admins_role ON admins(role);
+      
+      -- Product indexes
+      CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
+      CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+      CREATE INDEX IF NOT EXISTS idx_products_qr_code ON products(qr_code_data);
+      
+      -- Tag indexes
+      CREATE INDEX IF NOT EXISTS idx_tags_uhf_uid ON tags(uhf_uid);
+      CREATE INDEX IF NOT EXISTS idx_tags_product_id ON tags(product_id);
+      CREATE INDEX IF NOT EXISTS idx_tags_status ON tags(status);
+      CREATE INDEX IF NOT EXISTS idx_tags_qr_code ON tags(qr_code_data);
+      
+      -- Customer indexes
       CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email);
       CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+      
+      -- Cart indexes
       CREATE INDEX IF NOT EXISTS idx_cart_sessions_customer_id ON cart_sessions(customer_id);
       CREATE INDEX IF NOT EXISTS idx_cart_sessions_token ON cart_sessions(session_token);
       CREATE INDEX IF NOT EXISTS idx_cart_items_session_id ON cart_items(cart_session_id);
       CREATE INDEX IF NOT EXISTS idx_cart_items_product_id ON cart_items(product_id);
+      
+      -- Order indexes
       CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
       CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
       CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
-    `);
-    console.log('✅ Customer & Cart indexes checked/created successfully');
-  } catch (error) {
-    console.error('❌ Customer index creation failed:', error);
-  }
-}
-
-// Separate function for indexes
-const createIndexes = async () => {
-  try {
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_admins_email ON admins(email);
-      CREATE INDEX IF NOT EXISTS idx_admins_role ON admins(role);
+      
+      -- Exit gate indexes
+      CREATE INDEX IF NOT EXISTS idx_exit_logs_session_id ON exit_logs(session_id);
+      CREATE INDEX IF NOT EXISTS idx_exit_logs_status ON exit_logs(status);
+      CREATE INDEX IF NOT EXISTS idx_exit_scanned_items_uhf_uid ON exit_scanned_items(uhf_uid);
+      CREATE INDEX IF NOT EXISTS idx_exit_scanned_items_exit_log_id ON exit_scanned_items(exit_log_id);
+      
+      -- Admin invitation indexes
       CREATE INDEX IF NOT EXISTS idx_admin_invitations_token ON admin_invitations(token);
       CREATE INDEX IF NOT EXISTS idx_admin_invitations_email ON admin_invitations(email);
-      CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
-      CREATE INDEX IF NOT EXISTS idx_tags_tag_uid ON tags(tag_uid);
-      CREATE INDEX IF NOT EXISTS idx_tags_product_id ON tags(product_id);
-      CREATE INDEX IF NOT EXISTS idx_tags_status ON tags(status);
-      CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
     `);
-    console.log('✅ Database indexes checked/created successfully');
+    console.log('✅ Database indexes created successfully');
   } catch (error) {
     console.error('❌ Index creation failed:', error);
   }

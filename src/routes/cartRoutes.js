@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const cartController = require('../controllers/cartController');
-const { authenticateCartSession, authenticateCustomer } = require('../middleware/customerAuth');
+const { authenticateCartSession } = require('../middleware/customerAuth');
 
 // All cart routes require cart session authentication
 router.use(authenticateCartSession);

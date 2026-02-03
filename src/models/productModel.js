@@ -1,8 +1,9 @@
 const { pool } = require('../config/database');
+const crypto = require('crypto');
 
 class ProductModel {
   
-  // Create new product
+  // Create new product with auto-generated QR code
   async createProduct(productData) {
     const { 
       name, 
@@ -26,16 +27,30 @@ class ProductModel {
       }
     }
 
+    // Generate unique QR code data
+    const qrCodeData = this.generateQRCodeData(sku || name);
+    const qrCodeUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/product/${qrCodeData}`;
+
     const result = await pool.query(
       `INSERT INTO products (
         name, description, price, sku, category, image_url, 
-        stock_quantity, low_stock_threshold
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        stock_quantity, low_stock_threshold, qr_code_data, qr_code_url
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *`,
-      [name, description, price, sku, category, image_url, stock_quantity, low_stock_threshold]
+      [name, description, price, sku, category, image_url, 
+       stock_quantity, low_stock_threshold, qrCodeData, qrCodeUrl]
     );
 
     return result.rows[0];
+  }
+
+  // Generate QR code data
+  generateQRCodeData(baseString) {
+    const timestamp = Date.now();
+    const random = crypto.randomBytes(4).toString('hex');
+    // Format: PROD-{SKU/NAME}-{TIMESTAMP}-{RANDOM}
+    const cleanBase = baseString.replace(/[^a-zA-Z0-9]/g, '-').toUpperCase();
+    return `PROD-${cleanBase}-${timestamp}-${random}`;
   }
 
   // Get all products with pagination and filters
@@ -71,8 +86,8 @@ class ProductModel {
 
     if (search) {
       paramCount++;
-      query += ` AND (name ILIKE $${paramCount} OR description ILIKE $${paramCount})`;
-      countQuery += ` AND (name ILIKE $${paramCount} OR description ILIKE $${paramCount})`;
+      query += ` AND (name ILIKE $${paramCount} OR description ILIKE $${paramCount} OR sku ILIKE $${paramCount})`;
+      countQuery += ` AND (name ILIKE $${paramCount} OR description ILIKE $${paramCount} OR sku ILIKE $${paramCount})`;
       queryParams.push(`%${search}%`);
     }
 
@@ -88,7 +103,7 @@ class ProductModel {
     // Execute queries
     const [productsResult, countResult] = await Promise.all([
       pool.query(query, queryParams),
-      pool.query(countQuery, queryParams.slice(0, -2)) // Remove limit/offset for count
+      pool.query(countQuery, queryParams.slice(0, -2))
     ]);
 
     return {
@@ -120,18 +135,28 @@ class ProductModel {
     return result.rows[0];
   }
 
-  // Update product - FIXED VERSION
+  // Get product by QR code
+  async getProductByQRCode(qrCodeData) {
+    const result = await pool.query(
+      'SELECT * FROM products WHERE qr_code_data = $1 AND is_active = true',
+      [qrCodeData]
+    );
+    return result.rows[0];
+  }
+
+  // Update product
   async updateProduct(id, updateData) {
     const allowedFields = [
       'name', 'description', 'price', 'sku', 'category', 
-      'image_url', 'stock_quantity', 'low_stock_threshold', 'is_active'
+      'image_url', 'stock_quantity', 'low_stock_threshold', 'is_active',
+      'qr_code_data', 'qr_code_url'
     ];
     
     const updateFields = [];
     const queryParams = [];
     let paramCount = 0;
 
-    // Build dynamic update query with explicit type casting
+    // Build dynamic update query
     Object.keys(updateData).forEach(field => {
       if (allowedFields.includes(field) && updateData[field] !== undefined) {
         paramCount++;
@@ -169,9 +194,6 @@ class ProductModel {
       RETURNING *
     `;
 
-    console.log('Update Query:', query); // Debug log
-    console.log('Query Params:', queryParams); // Debug log
-
     const result = await pool.query(query, queryParams);
     return result.rows[0];
   }
@@ -206,6 +228,51 @@ class ProductModel {
        ORDER BY stock_quantity ASC`
     );
     return result.rows;
+  }
+
+  // Generate QR code for existing product
+  async generateQRCodeForProduct(productId) {
+    const product = await this.getProductById(productId);
+    if (!product) {
+      throw new Error('Product not found');
+    }
+
+    const qrCodeData = this.generateQRCodeData(product.sku || product.name);
+    const qrCodeUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/product/${qrCodeData}`;
+
+    await pool.query(
+      'UPDATE products SET qr_code_data = $1, qr_code_url = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+      [qrCodeData, qrCodeUrl, productId]
+    );
+
+    return { qr_code_data: qrCodeData, qr_code_url: qrCodeUrl };
+  }
+
+  // Generate QR codes for all products
+  async generateQRCodeForAllProducts() {
+    const products = await pool.query('SELECT id, sku, name FROM products WHERE qr_code_data IS NULL');
+    
+    const results = [];
+    for (const product of products.rows) {
+      try {
+        const qrData = await this.generateQRCodeForProduct(product.id);
+        results.push({
+          product_id: product.id,
+          product_name: product.name,
+          success: true,
+          qr_data: qrData.qr_code_data
+        });
+      } catch (error) {
+        results.push({
+          product_id: product.id,
+          product_name: product.name,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+    
+    return results;
   }
 }
 

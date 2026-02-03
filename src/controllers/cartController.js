@@ -3,6 +3,7 @@ const customerModel = require('../models/customerModel');
 const { successResponse, errorResponse, validateRequiredFields } = require('../utils/helpers');
 
 class CartController {
+
   
   // Add item to cart
   async addToCart(req, res, next) {
@@ -33,6 +34,15 @@ class CartController {
     }
   }
 
+
+
+
+
+
+
+
+
+  
   // Get cart items
   async getCart(req, res, next) {
     try {
@@ -52,6 +62,9 @@ class CartController {
       next(error);
     }
   }
+
+
+  
 
   // Update cart item quantity
   async updateCartItem(req, res, next) {
@@ -82,6 +95,9 @@ class CartController {
     }
   }
 
+
+
+  
   // Remove item from cart
   async removeFromCart(req, res, next) {
     try {
@@ -139,6 +155,63 @@ class CartController {
         successResponse('Cart summary retrieved successfully', {
           summary: cartSummary,
           items: cartItems
+        })
+      );
+
+    } catch (error) {
+      next(error);
+    }
+  }
+
+ // Add item to cart using NFC tag UID
+  async addToCartByNfc(req, res, next) {
+    try {
+      const { nfc_tag_uid, quantity = 1 } = req.body;
+      const cartSessionId = req.cart_session.id;
+
+      validateRequiredFields(req.body, ['nfc_tag_uid']);
+
+      // Get product by NFC tag
+      const product = await tagModel.getProductByTagUid(nfc_tag_uid);
+      
+      if (!product) {
+        return res.status(404).json(
+          errorResponse('Product not found for this NFC tag')
+        );
+      }
+
+      // Check if NFC tag is correct type
+      const tagInfo = await tagModel.getTagByUid(nfc_tag_uid);
+      if (tagInfo.tag_type !== 'nfc') {
+        return res.status(400).json(
+          errorResponse('This is not an NFC tag')
+        );
+      }
+
+      // Add to cart
+      const cartItem = await cartModel.addToCart(
+        cartSessionId, 
+        product.id, 
+        parseInt(quantity)
+      );
+
+      // Update cart session totals
+      await customerModel.updateCartSessionTotals(cartSessionId);
+      const updatedCart = await customerModel.getActiveCartSession(req.cart_session.customer_id);
+
+      res.json(
+        successResponse('Item added to cart successfully', {
+          cart_item: cartItem,
+          product: {
+            id: product.id,
+            name: product.name,
+            price: product.price,
+            sku: product.sku
+          },
+          cart_summary: {
+            item_count: updatedCart.item_count,
+            total_amount: updatedCart.total_amount
+          }
         })
       );
 
