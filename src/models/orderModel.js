@@ -1,7 +1,7 @@
 const { pool } = require('../config/database');
-
+ 
 class OrderModel {
-  
+ 
   // Create new order
   async createOrder(orderData) {
     const { 
@@ -11,7 +11,7 @@ class OrderModel {
       payment_method = 'razorpay',
       shipping_address = null 
     } = orderData;
-
+ 
     const result = await pool.query(
       `INSERT INTO orders (
         customer_id, cart_session_id, total_amount, 
@@ -20,10 +20,10 @@ class OrderModel {
       RETURNING *`,
       [customer_id, cart_session_id, total_amount, payment_method, shipping_address]
     );
-
+ 
     return result.rows[0];
   }
-
+ 
   // Create order items from cart items
   async createOrderItems(orderId, cartSessionId) {
     const result = await pool.query(
@@ -39,11 +39,11 @@ class OrderModel {
        RETURNING *`,
       [orderId, cartSessionId]
     );
-
+ 
     return result.rows;
   }
-
-  // Get order by ID
+ 
+  // Get order by ID with items
   async getOrderById(orderId) {
     const result = await pool.query(
       `SELECT 
@@ -57,13 +57,13 @@ class OrderModel {
        WHERE o.id = $1`,
       [orderId]
     );
-
+ 
     if (result.rows.length === 0) {
       return null;
     }
-
+ 
     const order = result.rows[0];
-
+ 
     // Get order items
     const itemsResult = await pool.query(
       `SELECT 
@@ -76,24 +76,37 @@ class OrderModel {
        WHERE oi.order_id = $1`,
       [orderId]
     );
-
+ 
     order.items = itemsResult.rows;
     return order;
   }
-
-  // Get order by Razorpay order ID
-  async getOrderByRazorpayOrderId(razorpayOrderId) {
-    const result = await pool.query(
-      'SELECT * FROM orders WHERE payment_intent_id = $1',
-      [razorpayOrderId]
-    );
-    return result.rows[0];
+ 
+  // Get order by Razorpay order ID (payment_intent_id)
+ // Get order by Razorpay order ID - FIXED with better logging
+// Get order by Razorpay order ID (payment_intent_id)
+async getOrderByRazorpayOrderId(razorpayOrderId) {
+  console.log('getOrderByRazorpayOrderId called with:', razorpayOrderId);
+  
+  const result = await pool.query(
+    'SELECT * FROM orders WHERE payment_intent_id = $1',
+    [razorpayOrderId]
+  );
+  
+  console.log('Query result rows:', result.rows.length);
+  
+  if (result.rows.length > 0) {
+    console.log('Found order:', result.rows[0].id);
+  } else {
+    console.log('No order found for payment_intent_id:', razorpayOrderId);
   }
-
-  // Get orders by customer
+  
+  return result.rows[0];
+}
+ 
+  // Get orders by customer with pagination
   async getOrdersByCustomer(customerId, page = 1, limit = 10) {
     const offset = (page - 1) * limit;
-
+ 
     const [ordersResult, countResult] = await Promise.all([
       pool.query(
         `SELECT * FROM orders 
@@ -107,7 +120,7 @@ class OrderModel {
         [customerId]
       )
     ]);
-
+ 
     return {
       orders: ordersResult.rows,
       pagination: {
@@ -118,54 +131,88 @@ class OrderModel {
       }
     };
   }
-
+ 
   // Update order status
-  async updateOrderStatus(orderId, status, paymentIntentId = null) {
-    const updates = ['status = $1', 'updated_at = CURRENT_TIMESTAMP'];
-    const params = [status, orderId];
-    let paramCount = 2;
-
+ // Update order status - FIXED with correct parameter handling
+async updateOrderStatus(orderId, status, paymentIntentId = null) {
+  try {
+    console.log('=== updateOrderStatus DEBUG ===');
+    console.log('Order ID:', orderId);
+    console.log('Status:', status);
+    console.log('Payment Intent ID:', paymentIntentId);
+    
+    let query;
+    let params;
+    
     if (paymentIntentId) {
-      paramCount++;
-      updates.push(`payment_intent_id = $${paramCount}`);
-      params.splice(1, 0, paymentIntentId); // Insert at position 1
+      // With payment intent ID - 3 parameters
+      query = `
+        UPDATE orders 
+        SET status = $1, 
+            payment_intent_id = $2, 
+            payment_status = 'completed',
+            updated_at = CURRENT_TIMESTAMP 
+        WHERE id = $3
+        RETURNING *
+      `;
+      params = [status, paymentIntentId, orderId];
+    } else {
+      // Without payment intent ID - 2 parameters
+      query = `
+        UPDATE orders 
+        SET status = $1, 
+            updated_at = CURRENT_TIMESTAMP 
+        WHERE id = $2
+        RETURNING *
+      `;
+      params = [status, orderId];
     }
-
-    if (status === 'paid') {
-      paramCount++;
-      updates.push(`payment_status = 'completed'`);
+    
+    console.log('Query:', query);
+    console.log('Params:', params);
+    
+    const result = await pool.query(query, params);
+    console.log('Result rows:', result.rows.length);
+    
+    if (result.rows.length === 0) {
+      console.error('No order found with ID:', orderId);
+      return null;
     }
-
-    const result = await pool.query(
-      `UPDATE orders 
-       SET ${updates.join(', ')} 
-       WHERE id = $${paramCount} 
-       RETURNING *`,
-      params
-    );
-
+    
+    console.log('Updated order:', {
+      id: result.rows[0].id,
+      status: result.rows[0].status,
+      payment_intent_id: result.rows[0].payment_intent_id,
+      payment_status: result.rows[0].payment_status
+    });
+    
     return result.rows[0];
+  } catch (error) {
+    console.error('Error in updateOrderStatus:', error);
+    throw error;
   }
-
+}
+ 
   // Update payment details
-  async updatePaymentDetails(orderId, paymentData) {
-    const { payment_intent_id, payment_status, payment_method } = paymentData;
+ // Update payment details - FIXED VERSION
+async updatePaymentDetails(orderId, paymentData) {
+  const { payment_intent_id, payment_status, payment_method } = paymentData;
 
-    const result = await pool.query(
-      `UPDATE orders 
-       SET 
-         payment_intent_id = $1,
-         payment_status = $2,
-         payment_method = $3,
-         updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4 
-       RETURNING *`,
-      [payment_intent_id, payment_status, payment_method, orderId]
-    );
+  const result = await pool.query(
+    `UPDATE orders 
+     SET 
+       payment_intent_id = $1::VARCHAR,
+       payment_status = $2::VARCHAR,
+       payment_method = $3::VARCHAR,
+       updated_at = CURRENT_TIMESTAMP
+     WHERE id = $4::UUID 
+     RETURNING *`,
+    [payment_intent_id, payment_status, payment_method, orderId]
+  );
 
-    return result.rows[0];
-  }
-
+  return result.rows[0];
+}
+ 
   // Mark cart session as completed
   async completeCartSession(cartSessionId) {
     await pool.query(
@@ -175,21 +222,24 @@ class OrderModel {
       [cartSessionId]
     );
   }
-
+ 
   // Update product stock after order
   async updateProductStock(orderId) {
-    // Decrease stock for each product in the order
-    await pool.query(
+    const result = await pool.query(
       `UPDATE products p
        SET stock_quantity = stock_quantity - oi.quantity,
            updated_at = CURRENT_TIMESTAMP
        FROM order_items oi
-       WHERE p.id = oi.product_id AND oi.order_id = $1`,
+       WHERE p.id = oi.product_id AND oi.order_id = $1
+       RETURNING p.id, p.name, p.stock_quantity`,
       [orderId]
     );
+ 
+    console.log(`Stock updated for ${result.rows.length} products`);
+    return result.rows;
   }
-
-  // Get all orders (for admin)
+ 
+  // Get all orders for admin with filters
   async getAllOrders(filters = {}) {
     const { 
       page = 1, 
@@ -198,9 +248,9 @@ class OrderModel {
       start_date,
       end_date 
     } = filters;
-
+ 
     const offset = (page - 1) * limit;
-    
+ 
     let query = `
       SELECT 
         o.*,
@@ -211,11 +261,11 @@ class OrderModel {
       LEFT JOIN customers c ON o.customer_id = c.id
       WHERE 1=1
     `;
-    
+ 
     let countQuery = `SELECT COUNT(*) FROM orders o WHERE 1=1`;
     const queryParams = [];
     let paramCount = 0;
-
+ 
     // Apply filters
     if (status) {
       paramCount++;
@@ -223,138 +273,31 @@ class OrderModel {
       countQuery += ` AND o.status = $${paramCount}`;
       queryParams.push(status);
     }
-
-    if (start_date) {
-      paramCount++;
-      query += ` AND o.created_at >= $${paramCount}`;
-      countQuery += ` AND o.created_at >= $${paramCount}`;
-      queryParams.push(start_date);
-    }
-
-    if (end_date) {
-      paramCount++;
-      query += ` AND o.created_at <= $${paramCount}`;
-      countQuery += ` AND o.created_at <= $${paramCount}`;
-      queryParams.push(end_date);
-    }
-
-    // Add sorting and pagination
-    query += ` ORDER BY o.created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
-    queryParams.push(limit, offset);
-
-    // Execute queries
-    const [ordersResult, countResult] = await Promise.all([
-      pool.query(query, queryParams),
-      pool.query(countQuery, queryParams.slice(0, -2))
-    ]);
-
-    return {
-      orders: ordersResult.rows,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: parseInt(countResult.rows[0].count),
-        totalPages: Math.ceil(countResult.rows[0].count / limit)
-      }
-    };
-  }
-
-    async getOrderByRazorpayOrderId(razorpayOrderId) {
-    const result = await pool.query(
-      'SELECT * FROM orders WHERE payment_intent_id = $1',
-      [razorpayOrderId]
-    );
-    return result.rows[0];
-  }
-
-   // Get orders by customer with pagination
-  async getOrdersByCustomer(customerId, page = 1, limit = 10) {
-    const offset = (page - 1) * limit;
-
-    const [ordersResult, countResult] = await Promise.all([
-      pool.query(
-        `SELECT * FROM orders 
-         WHERE customer_id = $1 
-         ORDER BY created_at DESC 
-         LIMIT $2 OFFSET $3`,
-        [customerId, limit, offset]
-      ),
-      pool.query(
-        'SELECT COUNT(*) FROM orders WHERE customer_id = $1',
-        [customerId]
-      )
-    ]);
-
-    return {
-      orders: ordersResult.rows,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: parseInt(countResult.rows[0].count),
-        totalPages: Math.ceil(countResult.rows[0].count / limit)
-      }
-    };
-  }
-
-  // Get all orders for admin
-  async getAllOrders(filters = {}) {
-    const { 
-      page = 1, 
-      limit = 10, 
-      status,
-      start_date,
-      end_date 
-    } = filters;
-
-    const offset = (page - 1) * limit;
-    
-    let query = `
-      SELECT 
-        o.*,
-        c.email as customer_email,
-        c.first_name,
-        c.last_name
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      WHERE 1=1
-    `;
-    
-    let countQuery = `SELECT COUNT(*) FROM orders o WHERE 1=1`;
-    const queryParams = [];
-    let paramCount = 0;
-
-    // Apply filters
-    if (status) {
-      paramCount++;
-      query += ` AND o.status = $${paramCount}`;
-      countQuery += ` AND o.status = $${paramCount}`;
-      queryParams.push(status);
-    }
-
+ 
     if (start_date) {
       paramCount++;
       query += ` AND o.created_at >= $${paramCount}::TIMESTAMP`;
       countQuery += ` AND o.created_at >= $${paramCount}::TIMESTAMP`;
       queryParams.push(start_date);
     }
-
+ 
     if (end_date) {
       paramCount++;
       query += ` AND o.created_at <= $${paramCount}::TIMESTAMP`;
       countQuery += ` AND o.created_at <= $${paramCount}::TIMESTAMP`;
       queryParams.push(end_date);
     }
-
+ 
     // Add sorting and pagination
     query += ` ORDER BY o.created_at DESC LIMIT $${paramCount + 1}::INTEGER OFFSET $${paramCount + 2}::INTEGER`;
     queryParams.push(limit, offset);
-
+ 
     // Execute queries
     const [ordersResult, countResult] = await Promise.all([
       pool.query(query, queryParams),
       pool.query(countQuery, queryParams.slice(0, -2))
     ]);
-
+ 
     return {
       orders: ordersResult.rows,
       pagination: {
@@ -365,9 +308,6 @@ class OrderModel {
       }
     };
   }
-
 }
-
-
-
+ 
 module.exports = new OrderModel();
