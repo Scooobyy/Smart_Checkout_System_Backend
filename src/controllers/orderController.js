@@ -1,19 +1,19 @@
 const orderModel = require('../models/orderModel');
 const cartModel = require('../models/cartModel');
 const customerModel = require('../models/customerModel');
-const razorpayService = require('../services/razorpayService');
+const paymentService = require('../services/paymentService');
 const { successResponse, errorResponse, validateRequiredFields } = require('../utils/helpers');
 
 class OrderController {
   
-  // Create order and Razorpay order
+  // Create order and payment
   async createOrder(req, res, next) {
     try {
       const { shipping_address, payment_method = 'razorpay' } = req.body;
       const cartSessionId = req.cart_session.id;
       const customerId = req.cart_session.customer_id;
 
-      // Get cart summary to calculate total
+      // Get cart summary
       const cartSummary = await cartModel.getCartSummary(cartSessionId);
       const cartItems = await cartModel.getCartItems(cartSessionId);
 
@@ -23,7 +23,7 @@ class OrderController {
         );
       }
 
-      // Validate stock availability
+      // Validate stock
       for (const item of cartItems) {
         if (item.quantity > item.stock_quantity) {
           return res.status(400).json(
@@ -32,7 +32,7 @@ class OrderController {
         }
       }
 
-      // Create order in our database
+      // Create order in database
       const orderData = {
         customer_id: customerId,
         cart_session_id: cartSessionId,
@@ -47,9 +47,9 @@ class OrderController {
       await orderModel.createOrderItems(order.id, cartSessionId);
 
       // Create Razorpay order
-      const razorpayOrder = await razorpayService.createOrder(
+      const razorpayOrder = await paymentService.createOrder(
         order.total_amount,
-        'INR',
+        process.env.PAYMENT_CURRENCY || 'INR',
         `order_${order.id}`,
         {
           order_id: order.id,
@@ -70,14 +70,18 @@ class OrderController {
             id: order.id,
             total_amount: order.total_amount,
             status: order.status,
-            currency: 'INR'
+            currency: razorpayOrder.currency
           },
           payment: {
             razorpay_order_id: razorpayOrder.order_id,
             amount: razorpayOrder.amount,
             currency: razorpayOrder.currency,
             key_id: process.env.RAZORPAY_KEY_ID,
-            callback_url: `${process.env.FRONTEND_URL}/payment-callback`
+            callback_url: `${process.env.FRONTEND_URL}/payment-callback`,
+            notes: {
+              order_id: order.id,
+              customer_id: customerId
+            }
           }
         })
       );
@@ -98,32 +102,32 @@ class OrderController {
         'razorpay_signature'
       ]);
 
+      console.log('Verifying payment:', {
+        razorpay_order_id,
+        razorpay_payment_id
+      });
+
       // Verify payment signature
-      const isValidSignature = razorpayService.verifyPaymentSignature(
+      const isValidSignature = paymentService.verifyPaymentSignature(
         razorpay_order_id,
         razorpay_payment_id,
         razorpay_signature
       );
 
       if (!isValidSignature) {
+        console.error('Payment signature verification failed');
         return res.status(400).json(
-          errorResponse('Payment verification failed')
+          errorResponse('Payment verification failed - invalid signature')
         );
       }
 
       // Find order by Razorpay order ID
-      const orderResult = await orderModel.pool.query(
-        'SELECT * FROM orders WHERE payment_intent_id = $1',
-        [razorpay_order_id]
-      );
-
-      if (orderResult.rows.length === 0) {
+      const order = await orderModel.getOrderByRazorpayOrderId(razorpay_order_id);
+      if (!order) {
         return res.status(404).json(
           errorResponse('Order not found')
         );
       }
-
-      const order = orderResult.rows[0];
 
       // Check if already processed
       if (order.status === 'paid') {
@@ -133,11 +137,11 @@ class OrderController {
       }
 
       // Fetch payment details from Razorpay
-      const paymentDetails = await razorpayService.fetchPayment(razorpay_payment_id);
+      const paymentDetails = await paymentService.fetchPayment(razorpay_payment_id);
 
       if (paymentDetails.status !== 'captured' && paymentDetails.status !== 'authorized') {
         return res.status(400).json(
-          errorResponse('Payment not completed')
+          errorResponse(`Payment not completed. Status: ${paymentDetails.status}`)
         );
       }
 
@@ -154,14 +158,82 @@ class OrderController {
       // Mark cart session as completed
       await orderModel.completeCartSession(order.cart_session_id);
 
+      console.log('Payment verified successfully for order:', order.id);
+
       res.json(
         successResponse('Payment verified successfully', { 
           order: updatedOrder,
           payment: {
             id: razorpay_payment_id,
             status: paymentDetails.status,
-            method: paymentDetails.method
+            method: paymentDetails.method,
+            amount: paymentDetails.amount / 100,
+            currency: paymentDetails.currency
           }
+        })
+      );
+
+    } catch (error) {
+      console.error('Payment verification error:', error);
+      next(error);
+    }
+  }
+
+  // Test payment (for development)
+  async testPayment(req, res, next) {
+    try {
+      const { order_id } = req.params;
+      const customerId = req.cart_session.customer_id;
+
+      // Get order
+      const order = await orderModel.getOrderById(order_id);
+      if (!order) {
+        return res.status(404).json(
+          errorResponse('Order not found')
+        );
+      }
+
+      // Check if order belongs to customer
+      if (order.customer_id !== customerId) {
+        return res.status(403).json(
+          errorResponse('Access denied')
+        );
+      }
+
+      // Generate test payment data
+      const testPayment = paymentService.generateTestPaymentData(order.payment_intent_id);
+
+      // Verify with test data
+      const isValid = paymentService.verifyPaymentSignature(
+        testPayment.order_id,
+        testPayment.payment_id,
+        testPayment.signature
+      );
+
+      if (!isValid) {
+        return res.status(400).json(
+          errorResponse('Test payment verification failed')
+        );
+      }
+
+      // Update order as paid
+      const updatedOrder = await orderModel.updateOrderStatus(
+        order.id, 
+        'paid', 
+        testPayment.payment_id
+      );
+
+      // Update product stock
+      await orderModel.updateProductStock(order.id);
+
+      // Mark cart session as completed
+      await orderModel.completeCartSession(order.cart_session_id);
+
+      res.json(
+        successResponse('Test payment completed successfully', { 
+          order: updatedOrder,
+          payment: testPayment,
+          note: 'This is a test payment. In production, use real Razorpay payments.'
         })
       );
 
@@ -267,9 +339,82 @@ class OrderController {
       res.json(
         successResponse('Razorpay key retrieved', {
           key_id: process.env.RAZORPAY_KEY_ID,
-          currency: 'INR'
+          currency: process.env.PAYMENT_CURRENCY || 'INR'
         })
       );
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // Check payment status
+  async checkPaymentStatus(req, res, next) {
+    try {
+      const { order_id } = req.params;
+      const customerId = req.cart_session.customer_id;
+
+      const order = await orderModel.getOrderById(order_id);
+
+      if (!order) {
+        return res.status(404).json(
+          errorResponse('Order not found')
+        );
+      }
+
+      // Check if order belongs to customer
+      if (order.customer_id !== customerId) {
+        return res.status(403).json(
+          errorResponse('Access denied')
+        );
+      }
+
+      // If payment_intent_id exists, fetch from Razorpay
+      let razorpayStatus = null;
+      if (order.payment_intent_id && order.status === 'pending') {
+        try {
+          const razorpayOrder = await paymentService.fetchOrder(order.payment_intent_id);
+          razorpayStatus = razorpayOrder.status;
+        } catch (error) {
+          console.error('Failed to fetch Razorpay status:', error);
+        }
+      }
+
+      res.json(
+        successResponse('Payment status retrieved', {
+          order_id: order.id,
+          status: order.status,
+          payment_intent_id: order.payment_intent_id,
+          razorpay_status: razorpayStatus,
+          total_amount: order.total_amount,
+          created_at: order.created_at
+        })
+      );
+
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // Get all orders (for admin)
+  async getAllOrders(req, res, next) {
+    try {
+      const { page = 1, limit = 10, status, customer_id, start_date, end_date } = req.query;
+
+      const filters = {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        status,
+        customer_id,
+        start_date,
+        end_date
+      };
+
+      const result = await orderModel.getAllOrders(filters);
+
+      res.json(
+        successResponse('All orders retrieved successfully', result)
+      );
+
     } catch (error) {
       next(error);
     }

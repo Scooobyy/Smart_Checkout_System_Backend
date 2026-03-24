@@ -28,6 +28,7 @@ app.use(morgan('combined'));
    BODY PARSING
 ====================== */
 // Webhook needs raw body (important: keep this BEFORE express.json)
+
 app.use('/api/orders/webhook', express.raw({ type: 'application/json' }));
 
 app.use(express.json({ limit: '10mb' }));
@@ -43,6 +44,11 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
 /* ======================
    API ROUTES

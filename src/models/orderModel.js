@@ -258,6 +258,116 @@ class OrderModel {
       }
     };
   }
+
+    async getOrderByRazorpayOrderId(razorpayOrderId) {
+    const result = await pool.query(
+      'SELECT * FROM orders WHERE payment_intent_id = $1',
+      [razorpayOrderId]
+    );
+    return result.rows[0];
+  }
+
+   // Get orders by customer with pagination
+  async getOrdersByCustomer(customerId, page = 1, limit = 10) {
+    const offset = (page - 1) * limit;
+
+    const [ordersResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT * FROM orders 
+         WHERE customer_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT $2 OFFSET $3`,
+        [customerId, limit, offset]
+      ),
+      pool.query(
+        'SELECT COUNT(*) FROM orders WHERE customer_id = $1',
+        [customerId]
+      )
+    ]);
+
+    return {
+      orders: ordersResult.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: parseInt(countResult.rows[0].count),
+        totalPages: Math.ceil(countResult.rows[0].count / limit)
+      }
+    };
+  }
+
+  // Get all orders for admin
+  async getAllOrders(filters = {}) {
+    const { 
+      page = 1, 
+      limit = 10, 
+      status,
+      start_date,
+      end_date 
+    } = filters;
+
+    const offset = (page - 1) * limit;
+    
+    let query = `
+      SELECT 
+        o.*,
+        c.email as customer_email,
+        c.first_name,
+        c.last_name
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE 1=1
+    `;
+    
+    let countQuery = `SELECT COUNT(*) FROM orders o WHERE 1=1`;
+    const queryParams = [];
+    let paramCount = 0;
+
+    // Apply filters
+    if (status) {
+      paramCount++;
+      query += ` AND o.status = $${paramCount}`;
+      countQuery += ` AND o.status = $${paramCount}`;
+      queryParams.push(status);
+    }
+
+    if (start_date) {
+      paramCount++;
+      query += ` AND o.created_at >= $${paramCount}::TIMESTAMP`;
+      countQuery += ` AND o.created_at >= $${paramCount}::TIMESTAMP`;
+      queryParams.push(start_date);
+    }
+
+    if (end_date) {
+      paramCount++;
+      query += ` AND o.created_at <= $${paramCount}::TIMESTAMP`;
+      countQuery += ` AND o.created_at <= $${paramCount}::TIMESTAMP`;
+      queryParams.push(end_date);
+    }
+
+    // Add sorting and pagination
+    query += ` ORDER BY o.created_at DESC LIMIT $${paramCount + 1}::INTEGER OFFSET $${paramCount + 2}::INTEGER`;
+    queryParams.push(limit, offset);
+
+    // Execute queries
+    const [ordersResult, countResult] = await Promise.all([
+      pool.query(query, queryParams),
+      pool.query(countQuery, queryParams.slice(0, -2))
+    ]);
+
+    return {
+      orders: ordersResult.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: parseInt(countResult.rows[0].count),
+        totalPages: Math.ceil(countResult.rows[0].count / limit)
+      }
+    };
+  }
+
 }
+
+
 
 module.exports = new OrderModel();
