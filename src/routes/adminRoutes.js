@@ -11,5 +11,6 @@ router.post('/auth/login', adminController.login);
 // Protected routes
 router.get('/profile', authenticateAdmin, adminController.getProfile);
 router.get('/admins', authenticateAdmin, requireRole([ROLES.SUPER_ADMIN, ROLES.ADMIN]), adminController.getAllAdmins);
+router.post('/register', authenticateAdmin, requireRole([ROLES.SUPER_ADMIN]), adminController.registerAdmin);
 
 module.exports = router;

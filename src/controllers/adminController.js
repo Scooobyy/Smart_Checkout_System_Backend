@@ -168,6 +168,55 @@ class AdminController {
       next(error);
     }
   }
+
+  // Register new admin (for super admin)
+  async registerAdmin(req, res, next) {
+    try {
+      const { username, email, password, role = ROLES.ADMIN } = req.body;
+      
+      // Validate required fields
+      validateRequiredFields(req.body, ['username', 'email', 'password']);
+
+      // Check if requester is super admin
+      if (req.admin.role !== ROLES.SUPER_ADMIN) {
+        return res.status(403).json(
+          errorResponse('Only super admins can create new admins')
+        );
+      }
+
+      // Password strength check
+      if (password.length < 6) {
+        return res.status(400).json(
+          errorResponse('Password must be at least 6 characters long')
+        );
+      }
+
+      // Create admin
+      const adminData = {
+        username,
+        email,
+        password,
+        role
+      };
+
+      const admin = await adminModel.createAdmin(adminData);
+
+      res.status(201).json(
+        successResponse('Admin registered successfully', {
+          admin: {
+            id: admin.id,
+            username: admin.username,
+            email: admin.email,
+            role: admin.role,
+            is_active: admin.is_active
+          }
+        })
+      );
+
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 module.exports = new AdminController();
