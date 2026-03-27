@@ -20,6 +20,28 @@ const initDatabase = async () => {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
+
+
+  -- Security Logs Table
+  CREATE TABLE IF NOT EXISTS security_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_type VARCHAR(50) NOT NULL,
+    severity VARCHAR(20) CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+    uhf_uids JSONB,
+    details JSONB,
+    gate_action VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_security_logs_created_at ON security_logs(created_at);
+  CREATE INDEX IF NOT EXISTS idx_security_logs_severity ON security_logs(severity);
+
+
+
+
+
+
+      
       -- Products Table with QR Code
       CREATE TABLE IF NOT EXISTS products (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -139,6 +161,8 @@ const initDatabase = async () => {
         is_paid BOOLEAN DEFAULT false,
         scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+
+      
 
       -- Admin Invitations Table
       CREATE TABLE IF NOT EXISTS admin_invitations (

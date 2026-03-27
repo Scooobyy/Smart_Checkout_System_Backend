@@ -247,28 +247,45 @@ class ExitGateController {
   }
 
   // Validate multiple UHF tags in real-time (for hardware integration)
-  async validateUHFTags(req, res, next) {
-    try {
-      const { uhf_uids } = req.body;
+ // Validate multiple UHF tags in real-time
+async validateUHFTags(req, res, next) {
+  try {
+    const { uhf_uids } = req.body;
 
-      validateRequiredFields(req.body, ['uhf_uids']);
+    validateRequiredFields(req.body, ['uhf_uids']);
 
-      if (!Array.isArray(uhf_uids) || uhf_uids.length === 0) {
-        return res.status(400).json(
-          errorResponse('uhf_uids must be a non-empty array')
-        );
-      }
-
-      const validationResult = await tagModel.validateExitUHFTags(uhf_uids);
-
-      res.json(
-        successResponse('UHF tags validated successfully', validationResult)
+    if (!Array.isArray(uhf_uids) || uhf_uids.length === 0) {
+      return res.status(400).json(
+        errorResponse('uhf_uids must be a non-empty array')
       );
-
-    } catch (error) {
-      next(error);
     }
+
+    const validationResult = await tagModel.validateExitUHFTags(uhf_uids);
+
+    // Log security events
+    if (!validationResult.all_paid) {
+      console.log('SECURITY ALERT:', {
+        timestamp: new Date().toISOString(),
+        unregistered: validationResult.unregistered_count,
+        unpaid: validationResult.unpaid_count,
+        details: {
+          unregistered_items: validationResult.unregistered_items,
+          unpaid_items: validationResult.unpaid_items
+        }
+      });
+    }
+
+    res.json(
+      successResponse('UHF tags validated', {
+        ...validationResult,
+        timestamp: new Date().toISOString()
+      })
+    );
+
+  } catch (error) {
+    next(error);
   }
+}
 
   // Check single UHF tag status
   async checkUHFTagStatus(req, res, next) {

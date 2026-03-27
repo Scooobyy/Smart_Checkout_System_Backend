@@ -249,75 +249,203 @@ class TagModel {
   }
 
   // Check if product is paid via UHF tag
-  async isProductPaidByUHFTag(uhfUid, withinHours = 1) {
+  // Check if product is paid via UHF tag - ENHANCED
+async isProductPaidByUHFTag(uhfUid, withinHours = 24) {
+  try {
     // Get product from UHF tag
     const product = await this.getProductByUHFTag(uhfUid);
     
     if (!product) {
       return { 
         isPaid: false, 
-        reason: 'Product not found for this UHF tag',
-        product_id: null,
-        product_name: null
+        status: 'unknown_tag',
+        reason: 'UHF tag not registered in system',
+        alert: true,
+        severity: 'high',
+        action: 'BLOCK_EXIT - Unregistered product detected'
       };
     }
 
-    // Check for paid orders
-    const result = await pool.query(
-      `SELECT o.id, o.status, o.created_at
+    // Check if product is even in inventory
+    if (!product.is_active) {
+      return {
+        isPaid: false,
+        status: 'inactive_product',
+        reason: 'Product is inactive/removed from inventory',
+        alert: true,
+        severity: 'high',
+        action: 'BLOCK_EXIT - Deactivated product'
+      };
+    }
+
+    // Check for any order (paid or pending)
+    const orderCheck = await pool.query(
+      `SELECT o.id, o.status, o.created_at, o.payment_status
        FROM orders o
        JOIN order_items oi ON o.id = oi.order_id
        WHERE oi.product_id = $1 
-         AND o.status = 'paid'
          AND o.created_at > NOW() - INTERVAL '${withinHours} hours'
        ORDER BY o.created_at DESC
        LIMIT 1`,
       [product.id]
     );
 
+    // No order exists for this product
+    if (orderCheck.rows.length === 0) {
+      return {
+        isPaid: false,
+        status: 'no_order',
+        reason: 'Product never scanned/purchased',
+        alert: true,
+        severity: 'critical',
+        action: 'BLOCK_EXIT - Unscanned product detected',
+        product_name: product.name,
+        product_id: product.id
+      };
+    }
+
+    const order = orderCheck.rows[0];
+
+    // Order exists but not paid
+    if (order.status !== 'paid') {
+      return {
+        isPaid: false,
+        status: 'unpaid_order',
+        reason: `Order ${order.id.substring(0, 8)} exists but not paid. Status: ${order.status}`,
+        alert: true,
+        severity: 'high',
+        action: 'BLOCK_EXIT - Unpaid product',
+        order_id: order.id,
+        order_status: order.status,
+        product_name: product.name,
+        product_id: product.id
+      };
+    }
+
+    // Product is properly paid
     return {
-      isPaid: result.rows.length > 0,
-      product_id: product.id,
+      isPaid: true,
+      status: 'paid',
+      reason: 'Product paid - Safe to exit',
+      alert: false,
+      action: 'ALLOW_EXIT',
+      order_id: order.id,
       product_name: product.name,
-      order: result.rows[0],
-      reason: result.rows.length > 0 ? 'Paid' : 'No paid order found'
+      product_id: product.id
+    };
+
+  } catch (error) {
+    console.error('Error checking payment status:', error);
+    return {
+      isPaid: false,
+      status: 'error',
+      reason: 'System error checking payment',
+      alert: true,
+      severity: 'high',
+      action: 'BLOCK_EXIT - Technical error'
     };
   }
+}
 
   // Validate multiple UHF tags at exit
-  async validateExitUHFTags(uhfUids) {
-    const validationResults = [];
-    let allPaid = true;
-    const unpaidItems = [];
+  // Validate multiple UHF tags at exit - ENHANCED
+async validateExitUHFTags(uhfUids) {
+  const validationResults = [];
+  let allPaid = true;
+  let hasUnregistered = false;
+  let hasUnpaid = false;
+  let hasError = false;
+  const unpaidItems = [];
+  const unregisteredItems = [];
+  const errorItems = [];
 
-    for (const uhfUid of uhfUids) {
-      const paymentStatus = await this.isProductPaidByUHFTag(uhfUid);
+  for (const uhfUid of uhfUids) {
+    const paymentStatus = await this.isProductPaidByUHFTag(uhfUid);
+    
+    validationResults.push({
+      uhf_uid: uhfUid,
+      ...paymentStatus
+    });
+
+    if (!paymentStatus.isPaid) {
+      allPaid = false;
       
-      validationResults.push({
-        uhf_uid: uhfUid,
-        ...paymentStatus
-      });
-
-      if (!paymentStatus.isPaid) {
-        allPaid = false;
+      if (paymentStatus.status === 'unknown_tag') {
+        hasUnregistered = true;
+        unregisteredItems.push({
+          uhf_uid: uhfUid,
+          reason: paymentStatus.reason,
+          severity: paymentStatus.severity
+        });
+      } else if (paymentStatus.status === 'no_order') {
+        hasUnpaid = true;
         unpaidItems.push({
           uhf_uid: uhfUid,
-          product_id: paymentStatus.product_id,
           product_name: paymentStatus.product_name,
-          reason: paymentStatus.reason
+          reason: paymentStatus.reason,
+          severity: 'critical'
+        });
+      } else if (paymentStatus.status === 'unpaid_order') {
+        hasUnpaid = true;
+        unpaidItems.push({
+          uhf_uid: uhfUid,
+          product_name: paymentStatus.product_name,
+          order_id: paymentStatus.order_id,
+          reason: paymentStatus.reason,
+          severity: 'high'
+        });
+      } else {
+        hasError = true;
+        errorItems.push({
+          uhf_uid: uhfUid,
+          reason: paymentStatus.reason,
+          severity: 'high'
         });
       }
     }
-
-    return {
-      all_paid: allPaid,
-      total_tags: uhfUids.length,
-      paid_count: validationResults.filter(r => r.isPaid).length,
-      unpaid_count: validationResults.filter(r => !r.isPaid).length,
-      unpaid_items: unpaidItems,
-      validation_results: validationResults
-    };
   }
+
+  // Determine overall security level
+  let securityLevel = 'green';
+  let message = 'All items verified - Gate opening';
+  let gateAction = 'OPEN';
+  
+  if (hasUnregistered) {
+    securityLevel = 'red';
+    message = '⚠️ ALERT: Unregistered items detected! Security notified.';
+    gateAction = 'LOCK';
+  } else if (hasUnpaid) {
+    securityLevel = 'red';
+    message = '⚠️ ALERT: Unpaid items detected! Security notified.';
+    gateAction = 'LOCK';
+  } else if (hasError) {
+    securityLevel = 'yellow';
+    message = '⚠️ System error. Manual verification required.';
+    gateAction = 'MANUAL_CHECK';
+  } else if (allPaid) {
+    securityLevel = 'green';
+    message = '✅ All items verified. Gate opening.';
+    gateAction = 'OPEN';
+  }
+
+  return {
+    all_paid: allPaid,
+    has_unregistered: hasUnregistered,
+    has_unpaid: hasUnpaid,
+    has_error: hasError,
+    security_level: securityLevel,
+    message: message,
+    gate_action: gateAction,
+    total_tags: uhfUids.length,
+    paid_count: validationResults.filter(r => r.isPaid).length,
+    unpaid_count: validationResults.filter(r => !r.isPaid && r.status !== 'unknown_tag').length,
+    unregistered_count: unregisteredItems.length,
+    unregistered_items: unregisteredItems,
+    unpaid_items: unpaidItems,
+    error_items: errorItems,
+    validation_results: validationResults
+  };
+}
 
   // Scan tag (update last_scanned_at)
   async scanTag(uhfUid) {
